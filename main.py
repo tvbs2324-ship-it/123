@@ -14,129 +14,147 @@ class JinPingMeiScraper:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         self.all_data = []
-        
+    
     def get_all_categories(self):
-        """获取所有分类链接"""
+        """Get all category URLs by parsing the main page"""
         try:
             response = self.session.get(self.base_url)
             soup = BeautifulSoup(response.content, 'html.parser')
-            menu = soup.find('nav', id='menu')
+            
+            # Find all links that contain category information
             categories = []
-            if menu:
-                links = menu.find_all('a')
-                for link in links:
-                    href = link.get('href')
-                    text = link.get_text(strip=True)
-                    if href and href != '/' and '定點' in text or '外約' in text:
-                        full_url = self.base_url + href if href.startswith('/') else href
-                        categories.append({'name': text, 'url': full_url})
+            
+            # Look for all a tags and extract those with proper hrefs
+            all_links = soup.find_all('a', href=True)
+            
+            for link in all_links:
+                href = link.get('href', '')
+                text = link.get_text(strip=True)
+                
+                # Filter for location pages (contains location names)
+                if href and '/' in href and any(keyword in text for keyword in ['定點', '外約']):
+                    full_url = href if href.startswith('http') else self.base_url + href
+                    categories.append({'name': text, 'url': full_url})
+            
             return categories
         except Exception as e:
-            print(f"获取分类失败: {e}")
+            print(f"Error getting categories: {e}")
             return []
     
-    def extract_role_info(self, soup, category_name):
-        """从页面提取所有角色信息"""
-        roles = []
-        # 查找所有图片块
-        images = soup.find_all('img')
-        text_content = soup.get_text()
+    def extract_girl_info(self, text, location_name):
+        """Extract girl information from page text using text parsing"""
+        girls = []
         
-        # 使用正则表达式匹配角色信息模式
-        # 匹配名字和基本信息 (身高.罩杯.年龄)
-        pattern = r'([\u4e00-\u9fa5]{2,4})\s*[\n\s]*(\d{3})\.(\d{2})\.(\w)\.(\d{2})Y?'
-        matches = re.finditer(pattern, text_content)
+        # Pattern to match girl entries
+        # Format: Name (Country) Age/Height/Weight/Cup ... 💰price
+        # Example: 周語晨(越) 20Y/164/43/真E
+        pattern = r'(中文|[\u4e00-\u9fa5]{2,4})(\(\w+\))?\s+(\d{1,2})Y/(\d{3})/(\d{2})/([真])([A-E])[^\n]*'
         
-        for match in matches:
-            name = match.group(1)
-            height = match.group(2)
-            weight = match.group(3)
-            cup = match.group(4)
-            age = match.group(5)
-            
-            # 提取该角色后面的服务信息
-            start_pos = match.end()
-            next_match_pos = text_content.find('💰', start_pos)
-            if next_match_pos == -1:
-                next_match_pos = start_pos + 500
-            
-            service_text = text_content[start_pos:next_match_pos]
-            
-            # 提取服务项目
-            service_line = ''
-            for line in service_text.split('\n'):
-                if '服務' in line or '舌吻' in line or '按摩' in line:
-                    service_line = line.strip()
-                    break
-            
-            # 提取价格
-            prices = re.findall(r'💰?\s*(\d+)分.*?(\d{4})', text_content[start_pos:next_match_pos+200])
-            price_40 = prices[0][1] if len(prices) > 0 else ''
-            price_60 = prices[1][1] if len(prices) > 1 else ''
-            
-            role = {
-                '分类': category_name,
-                '姓名': name,
-                '身高': height,
-                '体重': weight,
-                '罩杯': cup,
-                '年龄': age,
-                '服务项目': service_line[:100],
-                '40分钟价格': price_40,
-                '60分钟价格': price_60,
-                '抓取时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
-            roles.append(role)
+        # Split by girl entries and parse each
+        lines = text.split('\n')
+        current_girl = None
         
-        return roles
+        for i, line in enumerate(lines):
+            line = line.strip()
+            
+            # Try to find girl name pattern
+            if re.search(r'[一-\u9fa5]{2,4}\(\w+\)\s+\d{1,2}Y/\d{3}/\d{2}', line):
+                # Found a new girl
+                if current_girl:
+                    girls.append(current_girl)
+                
+                # Parse girl info
+                match = re.search(r'([一-\u9fa5]{2,4})(\(\w+\))?\s+(\d{1,2})Y/(\d{3})/(\d{2})/([^\s/]+)', line)
+                if match:
+                    name = match.group(1)
+                    age = match.group(3)
+                    height = match.group(4)
+                    weight = match.group(5)
+                    cup = match.group(6)[-1] if len(match.group(6)) > 0 else ''
+                    
+                    current_girl = {
+                        '分類': location_name,
+                        '姓名': name,
+                        '身高': height,
+                        '体重': weight,
+                        '罩杖': cup,
+                        '年齢': age,
+                        '服務項目': '',
+                        '40分鐘成一事約': '',
+                        '60分鐘成一事約': '',
+                        '抶取時間': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    
+                    # Look ahead for service and price info
+                    for j in range(i+1, min(i+30, len(lines))):
+                        next_line = lines[j].strip()
+                        
+                        # Look for prices
+                        if '✔' in next_line or 'Ἆ' in next_line or '1s/' in next_line:
+                            if '40' in next_line:
+                                current_girl['40分鐘成一事約'] = re.findall(r'\d{4}', next_line)[0] if re.findall(r'\d{4}', next_line) else ''
+                            if '50' in next_line:
+                                current_girl['60分鐘成一事約'] = re.findall(r'\d{4}', next_line)[0] if re.findall(r'\d{4}', next_line) else ''
+                        
+                        # Look for service line
+                        if '服務' in next_line or '舌' in next_line or '事' in next_line:
+                            current_girl['服務項目'] = next_line[:100]
+                            break
+        
+        if current_girl:
+            girls.append(current_girl)
+        
+        return girls
     
     def scrape_category(self, category):
-        """爬取单个分类的所有数据"""
+        """Scrape a single category page"""
         try:
-            print(f"正在爬取: {category['name']}")
+            print(f"Scraping: {category['name']}")
             response = self.session.get(category['url'])
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            roles = self.extract_role_info(soup, category['name'])
-            self.all_data.extend(roles)
-            print(f"  找到 {len(roles)} 个角色")
-            time.sleep(1)  # 避免请求过快
+            # Get all text content
+            text = soup.get_text()
+            
+            # Extract girl info
+            girls = self.extract_girl_info(text, category['name'])
+            self.all_data.extend(girls)
+            
+            print(f" Found {len(girls)} girls")
+            time.sleep(1)  # Be respectful with requests
             
         except Exception as e:
-            print(f"爬取 {category['name']} 失败: {e}")
+            print(f"Error scraping {category['name']}: {e}")
     
     def save_to_csv(self, filename='scraped_data.csv'):
-        """保存数据到CSV"""
+        """Save data to CSV file"""
         if not self.all_data:
-            print("没有数据可保存")
+            print("No data to save")
             return
         
         with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
-            fieldnames = ['分类', '姓名', '身高', '体重', '罩杯', '年龄', '服务项目', '40分钟价格', '60分钟价格', '抓取时间']
+            fieldnames = ['分類', '姓名', '身高', '体重', '罩杖', '年齢', '服務項目', '40分鐘成一事約', '60分鐘成一事約', '抶取時間']
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(self.all_data)
         
-        print(f"\n数据已保存到 {filename}")
-        print(f"总共爬取 {len(self.all_data)} 条记录")
+        print(f"\nData saved to {filename}")
+        print(f"Total records: {len(self.all_data)}")
     
     def run(self):
-        """运行完整爬虫"""
-        print("开始爬取金瓶梅网站...")
+        """Run the complete scraper"""
+        print("Starting JinPingMei scraper...")
         print("="*50)
         
-        # 获取所有分类
         categories = self.get_all_categories()
-        print(f"找到 {len(categories)} 个分类\n")
+        print(f"Found {len(categories)} categories\n")
         
-        # 爬取每个分类
         for i, category in enumerate(categories, 1):
             print(f"[{i}/{len(categories)}] ", end='')
             self.scrape_category(category)
         
-        # 保存数据
         self.save_to_csv()
-        print("\n爬取完成！")
+        print("\nScraping completed!")
 
 if __name__ == '__main__':
     scraper = JinPingMeiScraper()
