@@ -1,172 +1,143 @@
-import os
-import json
-import re
-from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify
-from google.cloud import firestore
+import csv
 import time
-import logging
-
-app = Flask(__name__)
-db = firestore.Client()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import re
+from datetime import datetime
+import os
 
 class JinPingMeiScraper:
     def __init__(self):
+        self.base_url = "https://www.jinpingmei23.tw"
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-        self.base_url = "https://www.jinpingmei23.tw/"
-
-    def fetch_page(self, url):
+        self.all_data = []
+        
+    def get_all_categories(self):
+        """获取所有分类链接"""
         try:
-            response = self.session.get(url, timeout=10)
-            return BeautifulSoup(response.content, 'html.parser')
+            response = self.session.get(self.base_url)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            menu = soup.find('nav', id='menu')
+            categories = []
+            if menu:
+                links = menu.find_all('a')
+                for link in links:
+                    href = link.get('href')
+                    text = link.get_text(strip=True)
+                    if href and href != '/' and '定點' in text or '外約' in text:
+                        full_url = self.base_url + href if href.startswith('/') else href
+                        categories.append({'name': text, 'url': full_url})
+            return categories
         except Exception as e:
-            logger.error(f"Failed to fetch {url}: {e}")
-            return None
-
-    def extract_name(self, text):
-        match = re.search(r'^([\u4e00-\u9fff]+)', text)
-        return match.group(1) if match else text.strip()
-
-    def extract_price(self, text):
-        match = re.search(r'(\d+)', text)
-        return int(match.group(1)) if match else 0
-
-    def generate_external_id(self, name, area):
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        return f"{area[:3]}-{name}-{timestamp}"
-
-    def scrape_character_cards(self):
-        soup = self.fetch_page(self.base_url)
-        if not soup:
+            print(f"获取分类失败: {e}")
             return []
-
-        characters = []
+    
+    def extract_role_info(self, soup, category_name):
+        """从页面提取所有角色信息"""
+        roles = []
+        # 查找所有图片块
+        images = soup.find_all('img')
+        text_content = soup.get_text()
         
-        cards = soup.find_all('div', class_=re.compile('card|item|character'))
+        # 使用正则表达式匹配角色信息模式
+        # 匹配名字和基本信息 (身高.罩杯.年龄)
+        pattern = r'([\u4e00-\u9fa5]{2,4})\s*[\n\s]*(\d{3})\.(\d{2})\.(\w)\.(\d{2})Y?'
+        matches = re.finditer(pattern, text_content)
         
-        for card in cards:
-            try:
-                name_elem = card.find(['h1', 'h2', 'h3', 'span', 'div'], class_=re.compile('name|title'))
-                age_elem = card.find(['span', 'div'], class_=re.compile('age'))
-                height_elem = card.find(['span', 'div'], class_=re.compile('height'))
-                price_elem = card.find(['span', 'div'], class_=re.compile('price|cost'))
-                area_elem = card.find(['span', 'div'], class_=re.compile('area|location'))
-                img_elem = card.find('img')
-                
-                name = self.extract_name(name_elem.get_text() if name_elem else 'Unknown')
-                age = age_elem.get_text().strip() if age_elem else 'N/A'
-                height = height_elem.get_text().strip() if height_elem else 'N/A'
-                price = price_elem.get_text().strip() if price_elem else '0'
-                area = area_elem.get_text().strip() if area_elem else '未知'
-                photo_url = img_elem['src'] if img_elem else ''
-                
-                external_id = self.generate_external_id(name, area)
-                
-                character = {
-                    'externalId': external_id,
-                    'name': name,
-                    'age': age,
-                    'height': height,
-                    'price': self.extract_price(price),
-                    'area': area,
-                    'photo_main': photo_url,
-                    'photo_secondary': '',
-                    'service': '',
-                    'more': '',
-                    'status': 'active',
-                    'updatedAt': datetime.now().isoformat(),
-                    'createdAt': datetime.now().isoformat()
-                }
-                
-                characters.append(character)
-                
-            except Exception as e:
-                logger.warning(f"Failed to parse card: {e}")
-                continue
-        
-        return characters
-
-    def save_to_firestore(self, characters):
-        stats = {'inserted': 0, 'updated': 0, 'deactivated': 0}
-        
-        for char in characters:
-            ext_id = char['externalId']
-            doc_ref = db.collection('persons').document(ext_id)
-            doc = doc_ref.get()
+        for match in matches:
+            name = match.group(1)
+            height = match.group(2)
+            weight = match.group(3)
+            cup = match.group(4)
+            age = match.group(5)
             
-            if doc.exists:
-                if self.has_changed(doc.to_dict(), char):
-                    doc_ref.update(char)
-                    stats['updated'] += 1
-                    logger.info(f"Updated: {ext_id}")
-                else:
-                    doc_ref.update({'updatedAt': datetime.now().isoformat()})
-            else:
-                doc_ref.set(char)
-                stats['inserted'] += 1
-                logger.info(f"Inserted: {ext_id}")
+            # 提取该角色后面的服务信息
+            start_pos = match.end()
+            next_match_pos = text_content.find('💰', start_pos)
+            if next_match_pos == -1:
+                next_match_pos = start_pos + 500
+            
+            service_text = text_content[start_pos:next_match_pos]
+            
+            # 提取服务项目
+            service_line = ''
+            for line in service_text.split('\n'):
+                if '服務' in line or '舌吻' in line or '按摩' in line:
+                    service_line = line.strip()
+                    break
+            
+            # 提取价格
+            prices = re.findall(r'💰?\s*(\d+)分.*?(\d{4})', text_content[start_pos:next_match_pos+200])
+            price_40 = prices[0][1] if len(prices) > 0 else ''
+            price_60 = prices[1][1] if len(prices) > 1 else ''
+            
+            role = {
+                '分类': category_name,
+                '姓名': name,
+                '身高': height,
+                '体重': weight,
+                '罩杯': cup,
+                '年龄': age,
+                '服务项目': service_line[:100],
+                '40分钟价格': price_40,
+                '60分钟价格': price_60,
+                '抓取时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            roles.append(role)
         
-        self.deactivate_old_records()
-        return stats
-
-    def deactivate_old_records(self):
-        now = datetime.now()
-        seven_days_ago = datetime.fromisoformat(
-            (now.timestamp() - 604800).__str__()
-        )
+        return roles
+    
+    def scrape_category(self, category):
+        """爬取单个分类的所有数据"""
+        try:
+            print(f"正在爬取: {category['name']}")
+            response = self.session.get(category['url'])
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            roles = self.extract_role_info(soup, category['name'])
+            self.all_data.extend(roles)
+            print(f"  找到 {len(roles)} 个角色")
+            time.sleep(1)  # 避免请求过快
+            
+        except Exception as e:
+            print(f"爬取 {category['name']} 失败: {e}")
+    
+    def save_to_csv(self, filename='scraped_data.csv'):
+        """保存数据到CSV"""
+        if not self.all_data:
+            print("没有数据可保存")
+            return
         
-        docs = db.collection('persons').where(
-            'updatedAt', '<', seven_days_ago.isoformat()
-        ).where('status', '==', 'active').stream()
+        with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
+            fieldnames = ['分类', '姓名', '身高', '体重', '罩杯', '年龄', '服务项目', '40分钟价格', '60分钟价格', '抓取时间']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self.all_data)
         
-        for doc in docs:
-            doc.reference.update({
-                'status': 'inactive',
-                'deactivatedAt': now.isoformat(),
-                'reason': 'auto_deactivated_7days'
-            })
-            logger.info(f"Deactivated: {doc.id}")
-
-    def has_changed(self, old_dict, new_dict):
-        return (
-            old_dict.get('price') != new_dict['price'] or
-            old_dict.get('service') != new_dict['service'] or
-            old_dict.get('photo_main') != new_dict['photo_main'] or
-            old_dict.get('more') != new_dict['more'] or
-            old_dict.get('area') != new_dict['area']
-        )
-
-@app.route('/scrape', methods=['GET', 'POST'])
-def scrape():
-    try:
-        scraper = JinPingMeiScraper()
-        characters = scraper.scrape_character_cards()
-        stats = scraper.save_to_firestore(characters)
+        print(f"\n数据已保存到 {filename}")
+        print(f"总共爬取 {len(self.all_data)} 条记录")
+    
+    def run(self):
+        """运行完整爬虫"""
+        print("开始爬取金瓶梅网站...")
+        print("="*50)
         
-        return jsonify({
-            'success': True,
-            'message': 'Scrape completed',
-            'stats': stats,
-            'total_characters': len(characters)
-        }), 200
-    except Exception as e:
-        logger.error(f"Error during scrape: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'healthy'}), 200
+        # 获取所有分类
+        categories = self.get_all_categories()
+        print(f"找到 {len(categories)} 个分类\n")
+        
+        # 爬取每个分类
+        for i, category in enumerate(categories, 1):
+            print(f"[{i}/{len(categories)}] ", end='')
+            self.scrape_category(category)
+        
+        # 保存数据
+        self.save_to_csv()
+        print("\n爬取完成！")
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    scraper = JinPingMeiScraper()
+    scraper.run()
