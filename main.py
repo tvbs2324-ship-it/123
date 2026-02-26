@@ -14,27 +14,26 @@ class JinPingMeiScraper:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         self.all_data = []
+        self.category_data = {}
     
     def get_all_categories(self):
-        """Get all category URLs by parsing the main page"""
+        """Get all category URLs"""
         try:
             response = self.session.get(self.base_url)
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Find all links that contain category information
             categories = []
-            
-            # Look for all a tags and extract those with proper hrefs
             all_links = soup.find_all('a', href=True)
             
             for link in all_links:
                 href = link.get('href', '')
                 text = link.get_text(strip=True)
                 
-                # Filter for location pages (contains location names)
-                if href and '/' in href and any(keyword in text for keyword in ['定點', '外約']):
+                if href and '/' in href and any(keyword in text for keyword in ['定點', '外約', '台妹']):
                     full_url = href if href.startswith('http') else self.base_url + href
-                    categories.append({'name': text, 'url': full_url})
+                    # Clean category name for filename
+                    safe_name = re.sub(r'[/\\:*?"<>|]', '-', text)
+                    categories.append({'name': text, 'url': full_url, 'safe_name': safe_name})
             
             return categories
         except Exception as e:
@@ -42,103 +41,112 @@ class JinPingMeiScraper:
             return []
     
     def extract_girl_info(self, text, location_name):
-        """Extract girl information from page text using text parsing"""
+        """Extract girl information from page text"""
         girls = []
         
-        # Pattern to match girl entries
-        # Format: Name (Country) Age/Height/Weight/Cup ... 💰price
-        # Example: 周語晨(越) 20Y/164/43/真E
-        pattern = r'(中文|[\u4e00-\u9fa5]{2,4})(\(\w+\))?\s+(\d{1,2})Y/(\d{3})/(\d{2})/([真])([A-E])[^\n]*'
-        
-        # Split by girl entries and parse each
+        # Split by common delimiters and process line by line
         lines = text.split('\n')
-        current_girl = None
         
-        for i, line in enumerate(lines):
-            line = line.strip()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
             
-            # Try to find girl name pattern
-            if re.search(r'[一-\u9fa5]{2,4}\(\w+\)\s+\d{1,2}Y/\d{3}/\d{2}', line):
-                # Found a new girl
-                if current_girl:
-                    girls.append(current_girl)
+            # Look for lines with girl name pattern: 2-4 Chinese chars, optionally (country), age, height, weight, cup
+            # More flexible pattern to catch different formats
+            match = re.search(r'([一-龥]{2,4})\s*(?:\(\w+\))?\s+(\d{1,2})Y/(\d{3})/(\d{2})(?:/|\.)([\u771f]?)([A-E]+)', line)
+            
+            if match:
+                name = match.group(1)
+                age = match.group(2)
+                height = match.group(3)
+                weight = match.group(4)
+                cup = match.group(6) if match.group(6) else match.group(5)[-1] if match.group(5) else ''
                 
-                # Parse girl info
-                match = re.search(r'([一-\u9fa5]{2,4})(\(\w+\))?\s+(\d{1,2})Y/(\d{3})/(\d{2})/([^\s/]+)', line)
-                if match:
-                    name = match.group(1)
-                    age = match.group(3)
-                    height = match.group(4)
-                    weight = match.group(5)
-                    cup = match.group(6)[-1] if len(match.group(6)) > 0 else ''
+                girl = {
+                    '分類': location_name,
+                    '姓名': name,
+                    '身高': height,
+                    '체重': weight,
+                    '罩杖': cup,
+                    '年齢': age,
+                    '服務項目': '',
+                    '40分鐘成一事約': '',
+                    '60分鐘成一事約': '',
+                    '抶取時間': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                
+                # Look ahead for prices and services
+                for j in range(i+1, min(i+50, len(lines))):
+                    next_line = lines[j].strip()
                     
-                    current_girl = {
-                        '分類': location_name,
-                        '姓名': name,
-                        '身高': height,
-                        '体重': weight,
-                        '罩杖': cup,
-                        '年齢': age,
-                        '服務項目': '',
-                        '40分鐘成一事約': '',
-                        '60分鐘成一事約': '',
-                        '抶取時間': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
+                    # Extract prices (look for 1s/40/3000 pattern or similar)
+                    if '/40/' in next_line or '1s/40' in next_line:
+                        prices = re.findall(r'\d{4}', next_line)
+                        if prices:
+                            girl['40分鐘成一事約'] = prices[0]
                     
-                    # Look ahead for service and price info
-                    for j in range(i+1, min(i+30, len(lines))):
-                        next_line = lines[j].strip()
-                        
-                        # Look for prices
-                        if '✔' in next_line or 'Ἆ' in next_line or '1s/' in next_line:
-                            if '40' in next_line:
-                                current_girl['40分鐘成一事約'] = re.findall(r'\d{4}', next_line)[0] if re.findall(r'\d{4}', next_line) else ''
-                            if '50' in next_line:
-                                current_girl['60分鐘成一事約'] = re.findall(r'\d{4}', next_line)[0] if re.findall(r'\d{4}', next_line) else ''
-                        
-                        # Look for service line
-                        if '服務' in next_line or '舌' in next_line or '事' in next_line:
-                            current_girl['服務項目'] = next_line[:100]
-                            break
-        
-        if current_girl:
-            girls.append(current_girl)
+                    if '/50/' in next_line or '/60/' in next_line or '1s/50' in next_line:
+                        prices = re.findall(r'\d{4}', next_line)
+                        if prices:
+                            girl['60分鐘成一事約'] = prices[-1] if len(prices) > 1 else prices[0]
+                    
+                    # Stop looking if we hit another girl or end marker
+                    if re.search(r'[一-龥]{2,4}\s*(?:\(\w+\))?\s+\d{1,2}Y/\d{3}/\d{2}', next_line) and next_line != line:
+                        break
+                
+                girls.append(girl)
+            
+            i += 1
         
         return girls
     
     def scrape_category(self, category):
         """Scrape a single category page"""
         try:
-            print(f"Scraping: {category['name']}")
-            response = self.session.get(category['url'])
+            print(f"Scraping: {category['name']}", end='... ')
+            response = self.session.get(category['url'], timeout=10)
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Get all text content
             text = soup.get_text()
-            
-            # Extract girl info
             girls = self.extract_girl_info(text, category['name'])
-            self.all_data.extend(girls)
             
-            print(f" Found {len(girls)} girls")
-            time.sleep(1)  # Be respectful with requests
+            # Store in both overall and category-specific lists
+            self.all_data.extend(girls)
+            self.category_data[category['safe_name']] = girls
+            
+            print(f"Found {len(girls)} girls")
+            time.sleep(0.5)  # Be respectful
             
         except Exception as e:
-            print(f"Error scraping {category['name']}: {e}")
+            print(f"Error: {e}")
     
-    def save_to_csv(self, filename='scraped_data.csv'):
-        """Save data to CSV file"""
+    def save_to_csv_by_category(self):
+        """Save data to individual CSV files by category"""
+        fieldnames = ['分類', '姓名', '身高', '体重', '罩杖', '年齢', '服務項目', '40分鐘成一事約', '60分鐘成一事約', '抶取時間']
+        
+        for safe_name, data in self.category_data.items():
+            if data:  # Only save if there's data
+                filename = f"{safe_name}.csv"
+                with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(data)
+                print(f"Saved: {filename} ({len(data)} records)")
+    
+    def save_to_csv_all(self, filename='scraped_data_all.csv'):
+        """Save all data to a single CSV"""
         if not self.all_data:
             print("No data to save")
             return
         
+        fieldnames = ['分類', '姓名', '身高', '体重', '罩杖', '年齢', '服務項目', '40分鐘成一事約', '60分鐘成一事約', '抶取時間']
+        
         with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
-            fieldnames = ['分類', '姓名', '身高', '体重', '罩杖', '年齢', '服務項目', '40分鐘成一事約', '60分鐘成一事約', '抶取時間']
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(self.all_data)
         
-        print(f"\nData saved to {filename}")
+        print(f"\nAll data saved to {filename}")
         print(f"Total records: {len(self.all_data)}")
     
     def run(self):
@@ -153,7 +161,14 @@ class JinPingMeiScraper:
             print(f"[{i}/{len(categories)}] ", end='')
             self.scrape_category(category)
         
-        self.save_to_csv()
+        # Save both individual and combined CSVs
+        print("\n" + "="*50)
+        print("Saving individual category CSVs...")
+        self.save_to_csv_by_category()
+        
+        print("\nSaving combined CSV...")
+        self.save_to_csv_all()
+        
         print("\nScraping completed!")
 
 if __name__ == '__main__':
